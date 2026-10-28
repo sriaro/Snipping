@@ -3453,7 +3453,7 @@ checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
 
 [[package]]
 name = "snipping"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3472,6 +3472,7 @@ dependencies = [
  "libmimalloc-sys",
  "mimalloc",
  "moxcms",
+ "naga",
  "png",
  "pollster",
  "resvg",

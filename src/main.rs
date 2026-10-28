@@ -318,8 +318,8 @@ impl CaptureWarmup {
         self.retry_at = None;
     }
 
-    fn retry_deadline(&self, now: Instant) -> Option<Instant> {
-        (!self.first_capture_pending).then_some(now + GPU_WARM)
+    fn idle_deadline(&self, now: Instant) -> Instant {
+        now + if self.first_capture_pending { GPU_HOLD } else { GPU_WARM }
     }
 }
 
@@ -675,7 +675,7 @@ impl App {
                 log(&format!("gpu {} warmed up", g.adapter_name));
                 self.gfx = Some(g);
                 if self.session.is_none() {
-                    self.gfx_deadline = self.capture_warmup.retry_deadline(Instant::now());
+                    self.gfx_deadline = Some(self.capture_warmup.idle_deadline(Instant::now()));
                 }
             }
             Ok(Err(e)) => {
@@ -871,7 +871,7 @@ impl App {
             Ok(f) => f,
             Err(e) => {
                 log(&format!("capture failed: {e:#}"));
-                self.gfx_deadline = self.capture_warmup.retry_deadline(Instant::now());
+                self.gfx_deadline = Some(self.capture_warmup.idle_deadline(Instant::now()));
                 beep();
                 return;
             }
@@ -891,7 +891,7 @@ impl App {
                 }
                 Err(e) => {
                     log(&format!("gpu init failed: {e:#}"));
-                    self.gfx_deadline = self.capture_warmup.retry_deadline(Instant::now());
+                    self.gfx_deadline = Some(self.capture_warmup.idle_deadline(Instant::now()));
                     beep();
                     return;
                 }
@@ -901,7 +901,7 @@ impl App {
         let window = &window;
         if let Err(e) = gfx.set_frame(frame.w, frame.h, frame.bgra()) {
             log(&format!("upload failed: {e:#}"));
-            self.gfx_deadline = self.capture_warmup.retry_deadline(Instant::now());
+            self.gfx_deadline = Some(self.capture_warmup.idle_deadline(Instant::now()));
             beep();
             return;
         }

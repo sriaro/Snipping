@@ -372,9 +372,61 @@ fn has_battery() -> bool {
     unsafe { GetSystemPowerStatus(&mut st) }.is_ok() && st.BatteryFlag != 128 && st.BatteryFlag != 255
 }
 
+const VS_DXBC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/overlay_vs.dxbc"));
+
+const FS_DXBC: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/overlay_fs.dxbc"));
+
 fn request_device(adapter: &wgpu::Adapter) -> Result<(wgpu::Device, wgpu::Queue)> {
     let limits = adapter.limits();
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("snipping"), required_limits: limits, ..Default::default() })).context("request device")
+    let required_features = adapter.features() & wgpu::Features::PASSTHROUGH_SHADERS;
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("snipping"), required_features, required_limits: limits, ..Default::default() })).context("request device")
+}
+
+fn precompiled_module(device: &wgpu::Device, entry: &'static str, code: &'static [u8]) -> wgpu::ShaderModule {
+    use std::borrow::Cow;
+    unsafe {
+        device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+            label: Some(entry),
+            entry_points: Cow::Owned(vec![wgpu::PassthroughShaderEntryPoint { name: Cow::Borrowed(entry), workgroup_size: (0, 0, 0) }]),
+            dxil: Some(Cow::Borrowed(code)),
+            ..Default::default()
+        })
+    }
+}
+
+fn make_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, format: wgpu::TextureFormat, vs: &wgpu::ShaderModule, fs: &wgpu::ShaderModule) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: None,
+        layout: Some(layout),
+        vertex: wgpu::VertexState { module: vs, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: fs,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn build_pipeline(device: &wgpu::Device, layout: &wgpu::PipelineLayout, format: wgpu::TextureFormat) -> (wgpu::RenderPipeline, bool) {
+    if device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS) {
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = make_pipeline(device, layout, format, &precompiled_module(device, "vs", VS_DXBC), &precompiled_module(device, "fs", FS_DXBC));
+        let rejected = pollster::block_on(validation.pop());
+        let failed = pollster::block_on(internal.pop());
+        match rejected.or(failed) {
+            None => return (pipeline, true),
+            Some(e) => crate::log(&format!("precompiled shaders rejected, compiling at run time: {e}")),
+        }
+    }
+    let shader = device.create_shader_module(wgpu::include_wgsl!("overlay.wgsl"));
+    (make_pipeline(device, layout, format, &shader, &shader), false)
 }
 
 fn open_device(instance: &wgpu::Instance, surface: &wgpu::Surface<'_>) -> Result<Opened> {
@@ -475,7 +527,6 @@ impl Gfx {
         };
         surface.configure(&device, &config);
 
-        let shader = device.create_shader_module(wgpu::include_wgsl!("overlay.wgsl"));
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
             entries: &[
@@ -495,22 +546,8 @@ impl Gfx {
             ],
         });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&layout)], immediate_size: 0 });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: None,
-            layout: Some(&pl),
-            vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let (pipeline, precompiled) = build_pipeline(&device, &pl, format);
+        crate::log(&format!("gpu {adapter_name}: {} shaders", if precompiled { "precompiled" } else { "run-time compiled" }));
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor { mag_filter: wgpu::FilterMode::Nearest, min_filter: wgpu::FilterMode::Nearest, ..Default::default() });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,

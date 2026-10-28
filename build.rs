@@ -19,6 +19,7 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=src/icon.rs");
     println!("cargo:rerun-if-changed=src/shell_assets.rs");
+    println!("cargo:rerun-if-changed=src/overlay.wgsl");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
     for dll in ["mfplat.dll", "mfreadwrite.dll"] {
@@ -28,6 +29,7 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=/CETCOMPAT");
 
     build_shell_assets(&out);
+    build_shaders(&out);
     let ico_path = out.join("snipping.ico");
     fs::write(&ico_path, build_ico()).unwrap();
     let manifest_path = out.join("snipping.manifest");
@@ -193,4 +195,61 @@ fn build_shell_assets(out: &Path) {
     }
     let output = command.output().expect("run Windows SDK MakePri");
     assert!(output.status.success(), "MakePri failed at {}: {} {}", tool.display(), String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+fn build_shaders(out: &Path) {
+    use naga::back::hlsl;
+    let source = fs::read_to_string("src/overlay.wgsl").unwrap();
+    let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| panic!("overlay.wgsl: {e}"));
+    let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all()).validate(&module).unwrap_or_else(|e| panic!("overlay.wgsl: {e:?}"));
+    let target = |register: u32| hlsl::BindTarget { space: 0, register, binding_array_size: None, dynamic_storage_buffer_offsets_index: None, restrict_indexing: false };
+    let mut binding_map = hlsl::BindingMap::default();
+    binding_map.insert(naga::ResourceBinding { group: 0, binding: 0 }, target(0));
+    binding_map.insert(naga::ResourceBinding { group: 0, binding: 2 }, hlsl::BindTarget { space: 255, ..target(0) });
+    for (register, binding) in [1, 3, 4, 5, 6, 7].into_iter().enumerate() {
+        binding_map.insert(naga::ResourceBinding { group: 0, binding }, target(register as u32));
+    }
+    let mut sampler_buffer_binding_map = hlsl::SamplerIndexBufferBindingMap::default();
+    sampler_buffer_binding_map.insert(hlsl::SamplerIndexBufferKey { group: 0 }, target(6));
+    let sampler_heap_target = hlsl::SamplerHeapBindTargets { standard_samplers: target(0), comparison_samplers: target(2048) };
+    let options = hlsl::Options { binding_map, fake_missing_bindings: false, special_constants_binding: Some(target(1)), sampler_heap_target, sampler_buffer_binding_map, ..Default::default() };
+    for (stage, entry, profile) in [(naga::ShaderStage::Vertex, "vs", "vs_5_1"), (naga::ShaderStage::Fragment, "fs", "ps_5_1")] {
+        let (stage_module, stage_info) = naga::back::pipeline_constants::process_overrides(&module, &info, Some((stage, entry)), &Default::default()).unwrap_or_else(|e| panic!("overlay.wgsl {entry}: {e}"));
+        let fragment = (stage == naga::ShaderStage::Vertex).then(|| hlsl::FragmentEntryPoint::new(&module, "fs").expect("overlay.wgsl has no fs entry point"));
+        let pipeline_options = hlsl::PipelineOptions { entry_point: Some((stage, entry.to_string())) };
+        let mut hlsl_source = String::new();
+        let mut reflection = hlsl::Writer::new(&mut hlsl_source, &options, &pipeline_options).write(&stage_module, &stage_info, fragment.as_ref()).unwrap_or_else(|e| panic!("overlay.wgsl {entry} to HLSL: {e}"));
+        let name = reflection.entry_point_names.pop().expect("one entry point").unwrap_or_else(|e| panic!("overlay.wgsl {entry}: {e}"));
+        fs::write(out.join(format!("overlay_{entry}.hlsl")), &hlsl_source).unwrap();
+        fs::write(out.join(format!("overlay_{entry}.dxbc")), compile_hlsl(&hlsl_source, &name, profile)).unwrap();
+    }
+}
+
+fn compile_hlsl(source: &str, entry: &str, profile: &str) -> Vec<u8> {
+    use windows::Win32::Graphics::Direct3D::{Fxc::{D3DCOMPILE_ENABLE_STRICTNESS, D3DCompile}, ID3DBlob, ID3DInclude};
+    use windows::core::PCSTR;
+    let entry_name = std::ffi::CString::new(entry).unwrap();
+    let profile_name = std::ffi::CString::new(profile).unwrap();
+    let mut code: Option<ID3DBlob> = None;
+    let mut errors: Option<ID3DBlob> = None;
+    let bytes = |blob: &ID3DBlob| unsafe { std::slice::from_raw_parts(blob.GetBufferPointer().cast::<u8>(), blob.GetBufferSize()) }.to_vec();
+    let result = unsafe {
+        D3DCompile(
+            source.as_ptr().cast(),
+            source.len(),
+            PCSTR::null(),
+            None,
+            None::<&ID3DInclude>,
+            PCSTR(entry_name.as_ptr().cast()),
+            PCSTR(profile_name.as_ptr().cast()),
+            D3DCOMPILE_ENABLE_STRICTNESS,
+            0,
+            &mut code,
+            Some(&mut errors),
+        )
+    };
+    match result {
+        Ok(()) => bytes(&code.expect("FXC returned no bytecode")),
+        Err(e) => panic!("FXC failed on {entry} ({profile}): {e}: {}", errors.map(|b| String::from_utf8_lossy(&bytes(&b)).into_owned()).unwrap_or_default()),
+    }
 }

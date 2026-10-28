@@ -21,7 +21,7 @@ Get `Snipping-<version>-windows-x64.zip` from the Releases page, unzip it anywhe
 
 ## Build
 
-Needs Windows 10 or 11, Rust 1.99 or newer and the MSVC build tools.
+Needs Windows 10 or 11, Rust 1.99 or newer and the MSVC build tools. The build script compiles the overlay shader to Direct3D bytecode with the D3DCompiler that ships with Windows and builds the shell icon index with MakePri from the Windows 10 SDK.
 
 ```
 cargo build --release --locked
