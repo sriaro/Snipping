@@ -883,5 +883,4 @@ impl Gfx {
         self.last_selection = sel;
         false
     }
-
 }

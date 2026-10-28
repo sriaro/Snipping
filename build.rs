@@ -12,6 +12,11 @@ use std::{
 const SIZES: [u32; 9] = [16, 20, 24, 32, 40, 48, 64, 128, 256];
 
 fn main() {
+    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+    unsafe {
+        env::set_var("TEMP", &out);
+        env::set_var("TMP", &out);
+    }
     println!("cargo:rerun-if-changed=src/icon.rs");
     println!("cargo:rerun-if-changed=src/shell_assets.rs");
     println!("cargo:rerun-if-changed=build.rs");
@@ -22,7 +27,6 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=delayimp.lib");
     println!("cargo:rustc-link-arg-bins=/CETCOMPAT");
 
-    let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     build_shell_assets(&out);
     let ico_path = out.join("snipping.ico");
     fs::write(&ico_path, build_ico()).unwrap();
@@ -36,6 +40,13 @@ fn main() {
       <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
     </dependentAssembly>
   </dependency>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
 </assembly>
 "#,
     )

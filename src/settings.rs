@@ -2581,11 +2581,10 @@ impl SettingsWindow {
         self.canvas = Some(pix);
     }
 
-    #[allow(unused_assignments)]
     fn present(&mut self, pix: &Pixmap, damage: Damage) {
         let hwnd = crate::hwnd_of(&self.window);
         let exposed = || hwnd.is_some_and(window_exposed);
-        let mut sent = if exposed() { Damage::Whole } else { damage };
+        let sent = if exposed() { Damage::Whole } else { damage };
         let (Some(w), Some(h)) = (NonZeroU32::new(pix.width()), NonZeroU32::new(pix.height())) else {
             return;
         };
@@ -2598,7 +2597,6 @@ impl SettingsWindow {
                 Damage::Part(a) if buf.age() == 1 => {
                     to_argb(&mut buf, pix, a);
                     if exposed() {
-                        sent = Damage::Whole;
                         to_argb(&mut buf, pix, whole);
                         buf.present().is_ok()
                     } else {
@@ -2613,7 +2611,6 @@ impl SettingsWindow {
                 }
                 Damage::Nothing if buf.age() == 1 => {
                     if exposed() {
-                        sent = Damage::Whole;
                         to_argb(&mut buf, pix, whole);
                         buf.present().is_ok()
                     } else {
@@ -2621,7 +2618,6 @@ impl SettingsWindow {
                     }
                 }
                 _ => {
-                    sent = Damage::Whole;
                     to_argb(&mut buf, pix, whole);
                     buf.present().is_ok()
                 }

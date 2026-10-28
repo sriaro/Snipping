@@ -1,0 +1,63 @@
+[package]
+edition = "2018"
+name = "imagepipe"
+version = "0.5.1"
+authors = ["Pedro Côrte-Real <pedro@pedrocr.net>"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "An image processing pipeline"
+documentation = "https://docs.rs/imagepipe/"
+categories = ["multimedia::images"]
+license = "LGPL-3.0-only"
+repository = "https://github.com/pedrocr/imagepipe"
+
+[lib]
+name = "imagepipe"
+path = "src/lib.rs"
+
+[dependencies.bincode]
+version = "1"
+
+[dependencies.blake3]
+version = "1"
+
+[dependencies.image]
+version = "0.25"
+default-features = false
+
+[dependencies.lazy_static]
+version = "1"
+
+[dependencies.log]
+version = "0.4"
+
+[dependencies.multicache]
+version = "0.6.0"
+
+[dependencies.num-traits]
+version = "0.2"
+
+[dependencies.rawloader]
+version = "0.37"
+
+[dependencies.rayon]
+version = "1"
+
+[dependencies.serde]
+version = "1"
+
+[dependencies.serde_derive]
+version = "1"
+
+[dependencies.serde_yaml]
+version = "0.8"
+
+[profile.dev]
+opt-level = 3
+
+[lints.rust]
+warnings = "allow"

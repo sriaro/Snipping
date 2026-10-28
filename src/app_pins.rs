@@ -65,10 +65,10 @@ fn clipboard_picture() -> Option<(bool, Vec<u8>)> {
     }
 }
 
-fn alpha_dib(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
+fn alpha_dib(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
     const HEADER: usize = 124;
     let row = w as usize * 4;
-    let mut dib = vec![0u8; HEADER + row * h as usize];
+    let mut dib = crate::convert::pixel_buffer(HEADER + row * h as usize, 0u8).ok()?;
     for (at, value) in [(0, HEADER as u32), (4, w), (8, h), (20, (row * h as usize) as u32), (40, 0x00ff_0000), (44, 0x0000_ff00), (48, 0x0000_00ff), (52, 0xff00_0000), (56, 0x7352_4742), (108, 4)] {
         dib[at..at + 4].copy_from_slice(&u32::to_le_bytes(value));
     }
@@ -79,7 +79,7 @@ fn alpha_dib(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
             *d = [s[2], s[1], s[0], s[3]];
         }
     }
-    dib
+    Some(dib)
 }
 
 fn clipboard_png(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
@@ -128,6 +128,14 @@ impl Drop for Global {
     }
 }
 
+fn keep_off_cloud_clipboard() {
+    use windows::{Win32::System::DataExchange::RegisterClipboardFormatW, core::w};
+    let format = unsafe { RegisterClipboardFormatW(w!("CanUploadToCloudClipboard")) };
+    if format != 0 && let Some(flag) = Global::holding(&0u32.to_le_bytes()) {
+        flag.hand_over(format);
+    }
+}
+
 pub(crate) fn put_picture_on_clipboard(w: u32, h: u32, rgba: &[u8]) -> Result<(), &'static str> {
     use windows::{
         Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW},
@@ -136,7 +144,7 @@ pub(crate) fn put_picture_on_clipboard(w: u32, h: u32, rgba: &[u8]) -> Result<()
     if !valid_image(rgba, w, h) {
         return Err("the picture is not usable");
     }
-    let dib = Global::holding(&alpha_dib(w, h, rgba)).ok_or("not enough memory for the picture")?;
+    let dib = alpha_dib(w, h, rgba).and_then(|dib| Global::holding(&dib)).ok_or("not enough memory for the picture")?;
     let png = clipboard_png(w, h, rgba).and_then(|bytes| Global::holding(&bytes));
     let png_format = unsafe { RegisterClipboardFormatW(w!("PNG")) };
     let open = (0..10).any(|i| {
@@ -151,6 +159,9 @@ pub(crate) fn put_picture_on_clipboard(w: u32, h: u32, rgba: &[u8]) -> Result<()
     let placed = unsafe { EmptyClipboard() }.is_ok() && dib.hand_over(CF_DIBV5);
     if placed && png_format != 0 && let Some(png) = png {
         png.hand_over(png_format);
+    }
+    if placed {
+        keep_off_cloud_clipboard();
     }
     unsafe {
         let _ = CloseClipboard();
@@ -183,7 +194,7 @@ fn rgba_of_alpha_dib(dib: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     }
     let (row, rows) = (w as usize * 4, h as usize);
     let pixels = dib[HEADER..].get(..row * rows)?;
-    let mut rgba = vec![0u8; pixels.len()];
+    let mut rgba = crate::convert::pixel_buffer(pixels.len(), 0u8).ok()?;
     for (y, src) in pixels.chunks_exact(row).enumerate() {
         let y = if height < 0 { y } else { rows - 1 - y };
         for (to, from) in rgba[y * row..][..row].as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {

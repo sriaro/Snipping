@@ -84,7 +84,6 @@ pub fn render(size: u32) -> Pixmap {
     pix
 }
 
-#[allow(dead_code)]
 pub fn render_rgba(size: u32) -> Vec<u8> {
     let mut data = render(size).take();
     for px in data.as_chunks_mut::<4>().0 {

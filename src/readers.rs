@@ -177,7 +177,7 @@ pub fn jpeg2000(bytes: &[u8]) -> Result<Rgba> {
     if stride == 0 || data.len() < w as usize * h as usize * stride {
         bail!("JPEG 2000: the decoder returned too little data");
     }
-    let mut out = Vec::with_capacity(w as usize * h as usize * 4);
+    let mut out = crate::convert::pixel_capacity(w as usize * h as usize * 4)?;
     for px in data.chunks_exact(stride).take(w as usize * h as usize) {
         let a = if alpha { px[channels] } else { 255 };
         match channels {
@@ -259,7 +259,7 @@ pub fn psd(bytes: &[u8]) -> Result<Rgba> {
     if data.len() < needed {
         return Err(cut());
     }
-    let mut out = vec![255u8; w * h * 4];
+    let mut out = crate::convert::pixel_buffer(w * h * 4, 255u8)?;
     let mut put = |c: usize, y: usize, row: &[u8]| {
         for (p, &v) in out[y * w * 4..(y + 1) * w * 4].as_chunks_mut::<4>().0.iter_mut().zip(row) {
             match c {
@@ -405,7 +405,7 @@ pub fn raw(path: &Path) -> Result<Rgba> {
     if img.data.len() < w as usize * h as usize * 3 {
         bail!("RAW: the decoder returned too little data");
     }
-    let mut out = Vec::with_capacity(w as usize * h as usize * 4);
+    let mut out = crate::convert::pixel_capacity(w as usize * h as usize * 4)?;
     for p in img.data.as_chunks::<3>().0.iter().take(w as usize * h as usize) {
         out.extend_from_slice(&[p[0], p[1], p[2], 255]);
     }

@@ -534,7 +534,6 @@ impl Text {
         }
         Some(reach)
     }
-
 }
 
 fn blend(d: &mut [u8], color: [u8; 3], cov: u32) {

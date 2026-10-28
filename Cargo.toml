@@ -1,11 +1,10 @@
 [package]
 name = "snipping"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "Screenshot, annotation, recording and conversion tool for Windows"
 repository = "https://github.com/sriaro/snipping"
-
 
 [[bin]]
 name = "Snipping"
@@ -16,18 +15,14 @@ anyhow = "1.0.104"
 arboard = "3.6.1"
 bytemuck = "1.25.2"
 cosmic-text = "0.19.0"
-
-
 swash = "0.2.10"
 fontdue = "0.9.4"
 global-hotkey = "0.8.0"
 gif = "0.14"
 heic = "0.1.6"
-hayro-jpeg2000 = "0.4.1"
+hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = ["simd"] }
 resvg = "0.48.1"
 imagepipe = "0.5.1"
-
-
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "webp", "gif", "tiff", "ico"] }
 png = "0.18.1"
 rgb = "0.8"
@@ -59,3 +54,6 @@ strip = true
 embed-resource = "3.0.12"
 png = "0.18.1"
 tiny-skia = "0.12.0"
+
+[patch.crates-io]
+imagepipe = { path = "vendor/imagepipe" }

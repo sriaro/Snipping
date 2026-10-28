@@ -547,7 +547,7 @@ fn webp_frames(bytes: &[u8], sink: &mut dyn Sink) -> Result<bool> {
         LoopCount::Times(n) => n.get() as u32,
     };
     let (cw, ch) = (w as usize, h as usize);
-    let mut canvas = vec![0u8; cw * ch * 4];
+    let mut canvas = crate::convert::pixel_buffer(cw * ch * 4, 0u8)?;
     let mut held = Held::new(sink, w, h, plays);
     let mut clear: Option<[usize; 4]> = None;
     for f in demux.frames() {
@@ -838,7 +838,7 @@ fn gif_encoder<W: Write>(out: W, w: u32, h: u32, plays: u32) -> Result<gif::Enco
 
 pub fn still_gif(p: &Params, w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     let mut enc = gif_encoder(Vec::new(), w, h, 1)?;
-    let mut frame = gif_picture(p, rgba, w as usize, [0, 0, w as usize, h as usize], None, false);
+    let mut frame = gif_picture(p, rgba, w as usize, [0, 0, w as usize, h as usize], None, false)?;
     frame.dispose = gif::DisposalMethod::Keep;
     frame.delay = 10;
     enc.write_frame(&frame).map_err(gif_err)?;
@@ -853,13 +853,13 @@ fn gif_quality(p: &Params) -> u8 {
     }
 }
 
-fn gif_picture(p: &Params, pic: &[u8], w: usize, rect: [usize; 4], under: Option<&[u8]>, clears: bool) -> gif::Frame<'static> {
+fn gif_picture(p: &Params, pic: &[u8], w: usize, rect: [usize; 4], under: Option<&[u8]>, clears: bool) -> Result<gif::Frame<'static>> {
     let [x0, y0, x1, y1] = rect;
     let (rw, rh) = (x1 - x0, y1 - y0);
     let sub = if under.is_none() && rw == w && rw * rh * 4 == pic.len() {
         std::borrow::Cow::Borrowed(pic)
     } else {
-        let mut sub = Vec::with_capacity(rw * rh * 4);
+        let mut sub = crate::convert::pixel_capacity(rw * rh * 4)?;
         for y in y0..y1 {
             let row = &pic[(y * w + x0) * 4..(y * w + x1) * 4];
             match under {
@@ -880,7 +880,7 @@ fn gif_picture(p: &Params, pic: &[u8], w: usize, rect: [usize; 4], under: Option
         transparent = Some((palette.len() / 3) as u8);
         palette.extend_from_slice(&[0, 0, 0]);
     }
-    gif::Frame { left: x0 as u16, top: y0 as u16, width: rw as u16, height: rh as u16, palette: Some(palette), transparent, buffer: std::borrow::Cow::Owned(q.indices), ..gif::Frame::default() }
+    Ok(gif::Frame { left: x0 as u16, top: y0 as u16, width: rw as u16, height: rh as u16, palette: Some(palette), transparent, buffer: std::borrow::Cow::Owned(q.indices), ..gif::Frame::default() })
 }
 
 fn cs(ms: u64) -> u64 {
@@ -956,7 +956,7 @@ impl<'p, W: Write> GifWriter<'p, W> {
         };
         let under = (!self.canvas.is_empty()).then_some(&self.canvas[..]);
         let mut frame = match rect {
-            Some(r) => gif_picture(self.p, &pic, w, r, under, gone.is_some()),
+            Some(r) => gif_picture(self.p, &pic, w, r, under, gone.is_some())?,
             None => gif::Frame { width: 1, height: 1, palette: Some(vec![0, 0, 0]), transparent: Some(0), buffer: std::borrow::Cow::Owned(vec![0]), ..gif::Frame::default() },
         };
         frame.dispose = if gone.is_some() { DisposalMethod::Background } else { DisposalMethod::Keep };
@@ -1062,7 +1062,7 @@ impl<W: Write + Seek> WebpWriter<W> {
             let sub = if (fw, fh) == (w, h) {
                 std::borrow::Cow::Borrowed(&rgba[..])
             } else {
-                let mut s = Vec::with_capacity(fw * fh * 4);
+                let mut s = crate::convert::pixel_capacity(fw * fh * 4)?;
                 for y in y0..y1 {
                     s.extend_from_slice(&rgba[(y * w + x0) * 4..(y * w + x1) * 4]);
                 }

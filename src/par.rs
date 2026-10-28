@@ -50,7 +50,7 @@ struct State {
 unsafe impl Send for Shared {}
 unsafe impl Sync for Shared {}
 
-fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
+fn lock<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -118,8 +118,62 @@ fn helper(shared: &Arc<Shared>) {
     }
 }
 
-fn spawn(helper: Box<dyn FnOnce() + Send>) {
-    let _ = thread::Builder::new().spawn(helper);
+const IDLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+type Job = Box<dyn FnOnce() + Send>;
+
+struct Pool {
+    state: Mutex<PoolState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct PoolState {
+    queue: std::collections::VecDeque<Job>,
+    idle: usize,
+    alive: usize,
+}
+
+fn pool() -> &'static Pool {
+    static POOL: std::sync::OnceLock<Pool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| Pool { state: Mutex::new(PoolState::default()), wake: Condvar::new() })
+}
+
+fn spawn(helper: Job) {
+    let pool = pool();
+    let start = {
+        let mut s = lock(&pool.state);
+        s.queue.push_back(helper);
+        let start = s.idle < s.queue.len() && s.alive < workers();
+        if start {
+            s.alive += 1;
+        }
+        start
+    };
+    pool.wake.notify_one();
+    if start && thread::Builder::new().name("snipping-par".into()).spawn(move || serve(pool)).is_err() {
+        lock(&pool.state).alive -= 1;
+    }
+}
+
+fn serve(pool: &'static Pool) {
+    let mut s = lock(&pool.state);
+    loop {
+        if let Some(job) = s.queue.pop_front() {
+            drop(s);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+            s = lock(&pool.state);
+            continue;
+        }
+        s.idle += 1;
+        let (guard, timeout) = pool.wake.wait_timeout(s, IDLE).unwrap_or_else(PoisonError::into_inner);
+        s = guard;
+        s.idle -= 1;
+        if timeout.timed_out() && s.queue.is_empty() {
+            s.alive -= 1;
+            return;
+        }
+    }
 }
 
 pub fn rows<T: Send>(data: &mut [T], row_len: usize, f: impl Fn(usize, &mut [T]) + Sync) {

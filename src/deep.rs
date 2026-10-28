@@ -103,12 +103,12 @@ fn to_srgb(enc: [f32; 3], cp: u8, tc: u8) -> [f32; 3] {
     gamut_to_709(cp, lin).map(linear_to_srgb)
 }
 
-pub fn to_8bit(d: &Deep) -> Vec<u8> {
+pub fn to_8bit(d: &Deep) -> Result<Vec<u8>> {
     if d.icc.is_some() && !d.is_hdr() {
-        return reduce(&to_srgb16(d).px);
+        return reduce(&to_srgb16(d)?.px);
     }
     let n = d.w as usize * d.h as usize;
-    let mut out = vec![0u8; n * 4];
+    let mut out = crate::convert::pixel_buffer(n * 4, 0u8)?;
     if !d.needs_mapping() {
         crate::par::rows(&mut out, d.w as usize * 4, |y, row| {
             let src = &d.px[y * d.w as usize * 4..(y + 1) * d.w as usize * 4];
@@ -116,7 +116,7 @@ pub fn to_8bit(d: &Deep) -> Vec<u8> {
                 *o = ((*s as u32 + 128) / 257) as u8;
             }
         });
-        return out;
+        return Ok(out);
     }
     let lut: Vec<f32> = (0..=65535u32).map(|v| v as f32 / 65535.0).collect();
     crate::par::rows(&mut out, d.w as usize * 4, |y, row| {
@@ -129,22 +129,33 @@ pub fn to_8bit(d: &Deep) -> Vec<u8> {
             o[3] = ((s[3] as u32 + 128) / 257) as u8;
         }
     });
-    out
+    Ok(out)
 }
 
-pub fn reduce(px: &[u16]) -> Vec<u8> {
-    px.iter().map(|s| ((*s as u32 + 128) / 257) as u8).collect()
+pub fn reduce(px: &[u16]) -> Result<Vec<u8>> {
+    let mut out = crate::convert::pixel_capacity(px.len())?;
+    out.extend(px.iter().map(|s| ((*s as u32 + 128) / 257) as u8));
+    Ok(out)
 }
 
-pub fn to_srgb16(d: &Deep) -> Deep {
+fn copied<T: Copy>(px: &[T]) -> Result<Vec<T>> {
+    let mut out = crate::convert::pixel_capacity(px.len())?;
+    out.extend_from_slice(px);
+    Ok(out)
+}
+
+pub fn to_srgb16(d: &Deep) -> Result<Deep> {
     if !d.needs_mapping() {
-        return Deep { px: d.px.clone(), w: d.w, h: d.h, cp: 0, tc: 0, alpha: d.alpha, icc: None };
+        return Ok(Deep { px: copied(&d.px)?, w: d.w, h: d.h, cp: 0, tc: 0, alpha: d.alpha, icc: None });
     }
     if let (Some(icc), false) = (&d.icc, d.is_hdr()) {
-        let px = crate::color::to_srgb_16(&d.px, d.w, icc).unwrap_or_else(|_| d.px.clone());
-        return Deep { px, w: d.w, h: d.h, cp: 0, tc: 0, alpha: d.alpha, icc: None };
+        let px = match crate::color::to_srgb_16(&d.px, d.w, icc) {
+            Ok(px) => px,
+            Err(_) => copied(&d.px)?,
+        };
+        return Ok(Deep { px, w: d.w, h: d.h, cp: 0, tc: 0, alpha: d.alpha, icc: None });
     }
-    let mut px = vec![0u16; d.px.len()];
+    let mut px = crate::convert::pixel_buffer(d.px.len(), 0u16)?;
     crate::par::rows(&mut px, d.w as usize * 4, |y, row| {
         let src = &d.px[y * d.w as usize * 4..(y + 1) * d.w as usize * 4];
         for (o, s) in row.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0.iter()) {
@@ -155,7 +166,7 @@ pub fn to_srgb16(d: &Deep) -> Deep {
             o[3] = s[3];
         }
     });
-    Deep { px, w: d.w, h: d.h, cp: 0, tc: 0, alpha: d.alpha, icc: None }
+    Ok(Deep { px, w: d.w, h: d.h, cp: 0, tc: 0, alpha: d.alpha, icc: None })
 }
 
 fn is_alpha(px: &[u16]) -> bool {
@@ -175,7 +186,7 @@ pub fn resize(mut d: Deep, mode: ResizeMode, filter: ResizeFilter) -> Result<Dee
         return Ok(d);
     }
     crate::convert::check_resized(nw, nh)?;
-    let mut px = vec![0u16; nw as usize * nh as usize * 4];
+    let mut px = crate::convert::pixel_buffer(nw as usize * nh as usize * 4, 0u16)?;
     let mut src = Image::from_slice_u8(w, h, bytemuck::cast_slice_mut::<u16, u8>(&mut d.px), PixelType::U16x4).map_err(|e| anyhow!("resize: {e}"))?;
     let mut dst = Image::from_slice_u8(nw, nh, bytemuck::cast_slice_mut::<u16, u8>(&mut px), PixelType::U16x4).map_err(|e| anyhow!("resize: {e}"))?;
     let muldiv = MulDiv::default();
@@ -201,7 +212,7 @@ pub fn encode(p: &Params, d: &Deep) -> Result<Vec<u8>> {
     let sdr: &Deep = if icc.is_some() || !d.needs_mapping() {
         d
     } else {
-        own = to_srgb16(d);
+        own = to_srgb16(d)?;
         &own
     };
     match p.kind {
@@ -211,7 +222,7 @@ pub fn encode(p: &Params, d: &Deep) -> Result<Vec<u8>> {
             if let Some(i) = icc {
                 let _ = enc.set_icc_profile(i);
             }
-            let (px, ct) = pack(sdr);
+            let (px, ct) = pack(sdr)?;
             enc.write_image(bytemuck::cast_slice(&px), sdr.w, sdr.h, ct)?;
         }
         _ => bail!("{} can't hold more than 8 bits", p.kind.label()),
@@ -219,12 +230,15 @@ pub fn encode(p: &Params, d: &Deep) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn pack(d: &Deep) -> (std::borrow::Cow<'_, [u16]>, image::ExtendedColorType) {
+fn pack(d: &Deep) -> Result<(std::borrow::Cow<'_, [u16]>, image::ExtendedColorType)> {
     if d.alpha {
-        (std::borrow::Cow::Borrowed(&d.px[..]), image::ExtendedColorType::Rgba16)
-    } else {
-        (d.px.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect(), image::ExtendedColorType::Rgb16)
+        return Ok((std::borrow::Cow::Borrowed(&d.px[..]), image::ExtendedColorType::Rgba16));
     }
+    let mut rgb = crate::convert::pixel_capacity(d.px.len() / 4 * 3)?;
+    for p in d.px.as_chunks::<4>().0.iter() {
+        rgb.extend_from_slice(&p[..3]);
+    }
+    Ok((std::borrow::Cow::Owned(rgb), image::ExtendedColorType::Rgb16))
 }
 
 pub fn from_heic_frame(f: &heic::hevc::DecodedFrame) -> Result<Deep> {
@@ -256,7 +270,7 @@ pub fn from_heic_frame(f: &heic::hevc::DecodedFrame) -> Result<Deep> {
     let scale = (1u32 << (bd - 8)) as f32;
     let (y_off, y_rng, c_mid, c_rng) =
         if f.full_range { (0.0, ((1u32 << bd) - 1) as f32, (128.0 * scale), ((1u32 << bd) - 1) as f32) } else { (16.0 * scale, 219.0 * scale, 128.0 * scale, 224.0 * scale) };
-    let mut px = vec![0u16; w * h * 4];
+    let mut px = crate::convert::pixel_buffer(w * h * 4, 0u16)?;
     crate::par::rows(&mut px, w * 4, |y, row| {
         let sy_ = y + ct;
         for x in 0..w {

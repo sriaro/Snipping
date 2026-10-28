@@ -329,7 +329,7 @@ fn sweep(dir: &Path, own: u32, alive: impl Fn(u32) -> bool) {
 }
 
 fn rec_pid(name: &str) -> Option<u32> {
-    name.strip_prefix("snipping-rec-")?.split('-').next()?.parse().ok()
+    name.strip_prefix("snipping-rec-").or_else(|| name.strip_prefix("snipping-estimate-"))?.split('-').next()?.parse().ok()
 }
 
 fn process_alive(pid: u32) -> bool {

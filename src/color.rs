@@ -66,7 +66,7 @@ pub fn from_cicp(cp: u8, tc: u8) -> Option<Vec<u8>> {
 pub fn to_srgb_8(rgba: &[u8], w: u32, icc: &[u8]) -> Result<Vec<u8>> {
     let src = parse(icc)?;
     let t = src.create_transform_8bit(Layout::Rgba, &ColorProfile::new_srgb(), Layout::Rgba, options(&src)).map_err(|e| anyhow!("colour profile: {e}"))?;
-    let mut out = vec![0u8; rgba.len()];
+    let mut out = crate::convert::pixel_buffer(rgba.len(), 0u8)?;
     let row = (w as usize * 4).max(4);
     crate::par::rows(&mut out, row, |i, dst| {
         let src_row = &rgba[i * row..i * row + dst.len()];
@@ -80,7 +80,7 @@ pub fn to_srgb_8(rgba: &[u8], w: u32, icc: &[u8]) -> Result<Vec<u8>> {
 pub fn to_srgb_16(px: &[u16], w: u32, icc: &[u8]) -> Result<Vec<u16>> {
     let src = parse(icc)?;
     let t = src.create_transform_16bit(Layout::Rgba, &ColorProfile::new_srgb(), Layout::Rgba, options(&src)).map_err(|e| anyhow!("colour profile: {e}"))?;
-    let mut out = vec![0u16; px.len()];
+    let mut out = crate::convert::pixel_buffer(px.len(), 0u16)?;
     let row = (w as usize * 4).max(4);
     crate::par::rows(&mut out, row, |i, dst| {
         let src_row = &px[i * row..i * row + dst.len()];

@@ -49,6 +49,6 @@ Copyright (C) 2026 sriaro.
 
 Snipping is free software under the GNU Affero General Public License, version 3 only (AGPL-3.0-only). See [LICENSE](LICENSE).
 
-Snipping links the codecs `heic`, `zenwebp` and `zenavif` (with `rav1d-safe`), which are available under AGPL-3.0-only or a commercial licence, so the whole program is under the AGPL. Camera RAW support uses the LGPL crates `imagepipe`, `rawloader` and `multicache`, and `zenavif-parse` is under MPL-2.0. All other dependencies use permissive licences such as MIT, Apache-2.0, BSD, Zlib or ISC. The notices of every linked package are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
+Snipping links the codecs `heic`, `zenwebp` and `zenavif` (with `rav1d-safe`), which are available under AGPL-3.0-only or a commercial licence, so the whole program is under the AGPL. Camera RAW support uses the LGPL crates `imagepipe`, `rawloader` and `multicache` (`imagepipe` is built from a copy in `vendor/imagepipe`, modified on 2026-10-28: its manifest no longer enables the `image` crate's default features, and the source comments, tests, converter binary and README were removed), and `zenavif-parse` is under MPL-2.0. All other dependencies use permissive licences such as MIT, Apache-2.0, BSD, Zlib or ISC. The notices of every linked package are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
 
 This repository is the complete source code of the program.

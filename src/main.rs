@@ -76,6 +76,8 @@ const GPU_WARM: Duration = Duration::from_secs(45);
 
 const GPU_HOLD: Duration = Duration::from_secs(300);
 
+const GPU_RETRY: [Duration; 3] = [Duration::from_secs(5), Duration::from_secs(15), Duration::from_secs(45)];
+
 const QUIT_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy)]
@@ -273,11 +275,13 @@ enum LayerOp {
 struct CaptureWarmup {
     startup_pending: bool,
     first_capture_pending: bool,
+    failures: usize,
+    retry_at: Option<Instant>,
 }
 
 impl CaptureWarmup {
     fn new() -> Self {
-        Self { startup_pending: true, first_capture_pending: true }
+        Self { startup_pending: true, first_capture_pending: true, failures: 0, retry_at: None }
     }
 
     fn take_startup(&mut self) -> bool {
@@ -288,8 +292,30 @@ impl CaptureWarmup {
         self.startup_pending = false;
     }
 
+    fn failed(&mut self, now: Instant) {
+        if self.first_capture_pending && let Some(delay) = GPU_RETRY.get(self.failures) {
+            self.failures += 1;
+            self.retry_at = Some(now + *delay);
+        }
+    }
+
+    fn take_retry(&mut self, now: Instant) -> bool {
+        match self.retry_at {
+            Some(at) if now >= at => {
+                self.retry_at = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn retry_pending(&self) -> Option<Instant> {
+        self.retry_at
+    }
+
     fn captured(&mut self) {
         self.first_capture_pending = false;
+        self.retry_at = None;
     }
 
     fn retry_deadline(&self, now: Instant) -> Option<Instant> {
@@ -619,11 +645,16 @@ impl App {
             return;
         }
         let Some(window) = self.window.clone() else {
+            self.capture_warmup.failed(Instant::now());
             return;
         };
         let start = match gfx::Gfx::begin(window) {
             Ok(s) => s,
-            Err(e) => return log(&format!("gpu warm-up failed: {e:#}")),
+            Err(e) => {
+                log(&format!("gpu warm-up failed: {e:#}"));
+                self.capture_warmup.failed(Instant::now());
+                return;
+            }
         };
         let proxy = self.proxy.clone();
         self.warm = Some(spawn_preparation(
@@ -646,29 +677,37 @@ impl App {
                 if self.session.is_none() {
                     self.gfx_deadline = self.capture_warmup.retry_deadline(Instant::now());
                 }
-                if !wait
-                    && self.capture_warmup.first_capture_pending
-                    && !self.quitting
-                    && !session::ending()
-                    && self.session.is_none()
-                    && self.settings.is_none()
-                    && self.convert.is_none()
-                    && self.recorder.is_none()
-                    && self.finishing.is_empty()
-                    && self.converting.is_empty()
-                    && self.pins.is_empty()
-                    && self.pending_pins.is_empty()
-                    && self.saving == 0
-                    && self.pending_save.is_none()
-                    && self.writes_pending() == 0
-                {
-                    mem::trim();
-                }
             }
-            Ok(Err(e)) => log(&format!("gpu warm-up failed: {e:#}")),
-            Err(_) => log("gpu warm-up worker stopped before producing a renderer"),
+            Ok(Err(e)) => {
+                log(&format!("gpu warm-up failed: {e:#}"));
+                self.capture_warmup.failed(Instant::now());
+            }
+            Err(_) => {
+                log("gpu warm-up worker stopped before producing a renderer");
+                self.capture_warmup.failed(Instant::now());
+            }
             _ => {}
         }
+        if !wait && self.idle_before_first_capture() {
+            mem::trim();
+        }
+    }
+
+    fn idle_before_first_capture(&self) -> bool {
+        self.capture_warmup.first_capture_pending
+            && !self.quitting
+            && !session::ending()
+            && self.session.is_none()
+            && self.settings.is_none()
+            && self.convert.is_none()
+            && self.recorder.is_none()
+            && self.finishing.is_empty()
+            && self.converting.is_empty()
+            && self.pins.is_empty()
+            && self.pending_pins.is_empty()
+            && self.saving == 0
+            && self.pending_save.is_none()
+            && self.writes_pending() == 0
     }
 
     fn finish_recording(&mut self, id: u64, res: Result<PathBuf, String>) {
@@ -2274,7 +2313,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
-        if self.capture_warmup.take_startup() && !self.quitting && self.session.is_none() {
+        if !self.quitting && self.session.is_none() && (self.capture_warmup.take_startup() || self.capture_warmup.take_retry(Instant::now())) {
             self.warm_up_gpu();
         }
         RECORDING.store(self.recorder.is_some() || !self.finishing.is_empty(), std::sync::atomic::Ordering::Release);
@@ -2300,6 +2339,9 @@ impl ApplicationHandler<UserEvent> for App {
             if let Some(at) = self.quit_by.filter(|at| *at > Instant::now()) {
                 wake = Some(wake.map_or(at, |w| w.min(at)));
             }
+        }
+        if !self.quitting && self.session.is_none() && let Some(at) = self.capture_warmup.retry_pending() {
+            wake = Some(wake.map_or(at, |w| w.min(at)));
         }
         let due = self.settings.as_mut().map(|s| [s.message_fades_at(), s.marquee_wake(), s.frame_wake()]).unwrap_or_default();
         let convert_due = self.convert.as_mut().and_then(|c| c.frame_wake());

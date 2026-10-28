@@ -22,6 +22,8 @@ const GRACE: Duration = Duration::from_secs(25);
 
 const LOOK: Duration = Duration::from_millis(50);
 
+const SAVERS: usize = 4;
+
 const REASON: PCWSTR = w!("Saving a screen recording.");
 
 struct Hooks {
@@ -113,6 +115,44 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
+struct Saver {
+    go: std::sync::mpsc::Sender<()>,
+    done: std::sync::mpsc::Receiver<()>,
+    busy: bool,
+}
+
+impl Saver {
+    fn start(step: fn()) -> Option<Saver> {
+        let (go, going) = std::sync::mpsc::channel::<()>();
+        let (done, finished) = std::sync::mpsc::channel::<()>();
+        std::thread::Builder::new()
+            .name("snipping-session-save".into())
+            .spawn(move || {
+                while going.recv().is_ok() {
+                    step();
+                    if done.send(()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Saver { go, done: finished, busy: false })
+    }
+
+    fn settled(&mut self) -> bool {
+        if self.busy && self.done.try_recv().is_ok() {
+            self.busy = false;
+        }
+        !self.busy
+    }
+
+    fn run(&mut self) -> Option<bool> {
+        self.go.send(()).ok()?;
+        self.busy = self.done.recv_timeout(LOOK).is_err();
+        Some(!self.busy)
+    }
+}
+
 fn end_of_session(hwnd: HWND, h: &Hooks, closing_app: bool) {
     let busy = (h.busy)();
     if busy {
@@ -124,18 +164,28 @@ fn end_of_session(hwnd: HWND, h: &Hooks, closing_app: bool) {
         return;
     }
     let until = Instant::now() + h.grace;
+    let mut savers: Vec<Saver> = Vec::new();
     loop {
-        let (step, (done, finished)) = (h.step, std::sync::mpsc::channel());
-        let spawned = std::thread::Builder::new().name("snipping-session-save".into()).spawn(move || {
-            step();
-            let _ = done.send(());
-        });
-        let quick = match spawned {
-            Ok(_) => finished.recv_timeout(LOOK).is_ok(),
-            Err(_) => {
-                (h.step)();
-                true
-            }
+        let quick = match savers.iter_mut().position(|s| s.settled()) {
+            Some(i) => match savers[i].run() {
+                Some(quick) => quick,
+                None => {
+                    savers.swap_remove(i);
+                    false
+                }
+            },
+            None if savers.len() < SAVERS => match Saver::start(h.step) {
+                Some(mut saver) => {
+                    let quick = saver.run().unwrap_or(false);
+                    savers.push(saver);
+                    quick
+                }
+                None => {
+                    (h.step)();
+                    true
+                }
+            },
+            None => true,
         };
         if !(h.busy)() || Instant::now() >= until {
             break;

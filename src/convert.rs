@@ -137,15 +137,27 @@ fn is_opaque(rgba: &[u8]) -> bool {
     rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255)
 }
 
-fn rgb_of(rgba: &[u8], bg: [u8; 3]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
+pub(crate) fn pixel_capacity<T>(len: usize) -> Result<Vec<T>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len).map_err(|_| anyhow!("not enough memory for the picture ({} MB needed)", len.saturating_mul(size_of::<T>()) >> 20))?;
+    Ok(v)
+}
+
+pub(crate) fn pixel_buffer<T: Copy>(len: usize, fill: T) -> Result<Vec<T>> {
+    let mut v = pixel_capacity(len)?;
+    v.resize(len, fill);
+    Ok(v)
+}
+
+fn rgb_of(rgba: &[u8], bg: [u8; 3]) -> Result<Vec<u8>> {
+    let mut out = pixel_capacity(rgba.len() / 4 * 3)?;
     for p in rgba.as_chunks::<4>().0.iter() {
         let a = p[3] as u32;
         for k in 0..3 {
             out.push(((p[k] as u32 * a + bg[k] as u32 * (255 - a) + 127) / 255) as u8);
         }
     }
-    out
+    Ok(out)
 }
 
 fn check_buffer(w: u32, h: u32, rgba: &[u8]) -> Result<()> {
@@ -249,7 +261,7 @@ fn encode_exact(p: &Params, w: u32, h: u32, rgba: &[u8], icc: Option<&[u8]>) -> 
                 let _ = enc.set_icc_profile(i.to_vec());
             }
             if opaque {
-                enc.write_image(&rgb_of(rgba, [0; 3]), w, h, ExtendedColorType::Rgb8)?;
+                enc.write_image(&rgb_of(rgba, [0; 3])?, w, h, ExtendedColorType::Rgb8)?;
             } else {
                 enc.write_image(rgba, w, h, ExtendedColorType::Rgba8)?;
             }
@@ -259,7 +271,7 @@ fn encode_exact(p: &Params, w: u32, h: u32, rgba: &[u8], icc: Option<&[u8]>) -> 
             if let Some(i) = icc {
                 let _ = enc.set_icc_profile(i.to_vec());
             }
-            enc.write_image(&rgb_of(rgba, p.background), w, h, ExtendedColorType::Rgb8)?;
+            enc.write_image(&rgb_of(rgba, p.background)?, w, h, ExtendedColorType::Rgb8)?;
         }
         Kind::Webp => {
             use zenwebp::{EncodeRequest, LosslessConfig, LossyConfig, PixelLayout};
@@ -297,16 +309,16 @@ pub enum Decoded {
 }
 
 impl Decoded {
-    pub fn into_8bit(self) -> (Vec<u8>, u32, u32) {
+    pub fn into_8bit(self) -> Result<(Vec<u8>, u32, u32)> {
         self.into_8bit_keeping(false)
     }
 
-    pub fn into_8bit_keeping(self, keep: bool) -> (Vec<u8>, u32, u32) {
-        match self {
+    pub fn into_8bit_keeping(self, keep: bool) -> Result<(Vec<u8>, u32, u32)> {
+        Ok(match self {
             Decoded::Eight(px, w, h) => (px, w, h),
-            Decoded::Deep(d) if keep && !d.is_hdr() => (crate::deep::reduce(&d.px), d.w, d.h),
-            Decoded::Deep(d) => (crate::deep::to_8bit(&d), d.w, d.h),
-        }
+            Decoded::Deep(d) if keep && !d.is_hdr() => (crate::deep::reduce(&d.px)?, d.w, d.h),
+            Decoded::Deep(d) => (crate::deep::to_8bit(&d)?, d.w, d.h),
+        })
     }
 }
 
@@ -324,7 +336,7 @@ fn plain(d: Decoded) -> Picture {
 }
 
 pub fn decode(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
-    Ok(decode_picture(path)?.px.into_8bit())
+    decode_picture(path)?.px.into_8bit()
 }
 
 pub fn decode_srgb(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
@@ -337,9 +349,9 @@ pub fn decode_srgb(path: &Path) -> Result<(Vec<u8>, u32, u32)> {
             },
             (Decoded::Deep(mut d), icc) => {
                 d.icc = icc;
-                (crate::deep::to_8bit(&d), d.w, d.h)
+                (crate::deep::to_8bit(&d)?, d.w, d.h)
             }
-            (px, _) => px.into_8bit(),
+            (px, _) => px.into_8bit()?,
         })
     })
 }
@@ -411,7 +423,7 @@ fn pick_reader(path: &Path) -> Result<Reader> {
     if head.starts_with(&[0, 0, 1, 0]) || ext == "ico" {
         return Ok(Reader::Ico);
     }
-    if [b"II* ", b"MM *", b"II+ ", b"MM +"].iter().any(|magic| head.starts_with(*magic)) {
+    if [b"II*\0", b"MM\0*", b"II+\0", b"MM\0+"].iter().any(|magic| head.starts_with(*magic)) {
         return Ok(Reader::Tiff);
     }
     Ok(Reader::Image)
@@ -442,7 +454,7 @@ fn run_reader(reader: Reader, path: &Path) -> Result<Picture> {
 
 fn decode_unguarded(path: &Path) -> Result<Picture> {
     let reader = pick_reader(path)?;
-    if reader.isolated() && !IN_HELPER.load(Ordering::Relaxed) {
+    if reader.isolated() && !IN_HELPER.load(Ordering::Relaxed) && !cfg!(test) {
         return decode_in_helper(path);
     }
     let mut pic = run_reader(reader, path)?;
@@ -609,7 +621,7 @@ fn read_answer<R: std::io::Read>(out: &mut R, anim: Option<&mut dyn crate::anim:
         b"OK" => {
             let (w, h) = (u32_at(out)?, u32_at(out)?);
             check_size(w, h)?;
-            let mut px = vec![0u8; w as usize * h as usize * 4];
+            let mut px = pixel_buffer(w as usize * h as usize * 4, 0u8)?;
             out.read_exact(&mut px).map_err(|_| crashed())?;
             let icc = read_icc(out)?;
             Ok(Helped::Still(Picture { px: Decoded::Eight(px, w, h), icc }))
@@ -622,7 +634,7 @@ fn read_answer<R: std::io::Read>(out: &mut R, anim: Option<&mut dyn crate::anim:
             }
             let mut meta = [0u8; 2];
             out.read_exact(&mut meta).map_err(|_| crashed())?;
-            let mut px = vec![0u16; w as usize * h as usize * 4];
+            let mut px = pixel_buffer(w as usize * h as usize * 4, 0u16)?;
             out.read_exact(bytemuck::cast_slice_mut(&mut px)).map_err(|_| crashed())?;
             if cfg!(target_endian = "big") {
                 px.iter_mut().for_each(|v| *v = u16::from_le(*v));
@@ -647,7 +659,7 @@ fn read_answer<R: std::io::Read>(out: &mut R, anim: Option<&mut dyn crate::anim:
                         frames += 1;
                         crate::anim::check(w, h, frames)?;
                         let ms = u32_at(out)?;
-                        let mut px = vec![0u8; w as usize * h as usize * 4];
+                        let mut px = pixel_buffer(w as usize * h as usize * 4, 0u8)?;
                         out.read_exact(&mut px).map_err(|_| crashed())?;
                         clock(false);
                         sink.frame(px, ms)?;
@@ -673,7 +685,7 @@ fn decode_in_helper(path: &Path) -> Result<Picture> {
 }
 
 pub(crate) fn decode_animation(path: &Path, sink: &mut dyn crate::anim::Sink, stop: &Stop) -> Result<bool> {
-    if IN_HELPER.load(Ordering::Relaxed) {
+    if IN_HELPER.load(Ordering::Relaxed) || cfg!(test) {
         let len = std::fs::metadata(path)?.len();
         if len > MAX_FILE_BYTES {
             bail!("the file is too large to open ({} MB)", len >> 20);
@@ -777,9 +789,9 @@ pub fn run_decode_helper(args: &[std::ffi::OsString]) -> Option<i32> {
             Err(e) => out.write_all(b"ER").and_then(|()| out.write_all(format!("{e:#}").as_bytes())),
         }
     } else {
-        let decoded = decode_picture(Path::new(path)).map(|pic| match pic.px {
+        let decoded = decode_picture(Path::new(path)).and_then(|pic| match pic.px {
             Decoded::Deep(deep) if deep.w as u64 * deep.h as u64 * 8 > MAX_DECODE_BYTES => eight_for_app(deep, pic.icc),
-            _ => pic,
+            _ => Ok(pic),
         });
         let write_icc = |out: &mut std::io::BufWriter<std::io::StdoutLock>, icc: &Option<Vec<u8>>| -> std::io::Result<()> {
             match icc {
@@ -814,11 +826,11 @@ pub fn run_decode_helper(args: &[std::ffi::OsString]) -> Option<i32> {
     Some(if written.and_then(|()| out.flush()).is_ok() { 0 } else { 1 })
 }
 
-fn eight_for_app(mut deep: crate::deep::Deep, icc: Option<Vec<u8>>) -> Picture {
+fn eight_for_app(mut deep: crate::deep::Deep, icc: Option<Vec<u8>>) -> Result<Picture> {
     let icc = icc.filter(|_| !deep.is_hdr());
     deep.icc = icc.clone();
-    let (px, w, h) = Decoded::Deep(deep).into_8bit_keeping(icc.is_some());
-    Picture { px: Decoded::Eight(px, w, h), icc }
+    let (px, w, h) = Decoded::Deep(deep).into_8bit_keeping(icc.is_some())?;
+    Ok(Picture { px: Decoded::Eight(px, w, h), icc })
 }
 
 pub fn can_read(ext: &str) -> bool {
@@ -995,7 +1007,7 @@ fn decode_with_image(path: &Path) -> Result<Picture> {
     if !image_format_allowed(reader.format()) {
         bail!("{} is not a picture format Snipping reads", path.display());
     }
-    if matches!(reader.format(), Some(image::ImageFormat::Ico | image::ImageFormat::Tiff)) && !IN_HELPER.load(Ordering::Relaxed) {
+    if matches!(reader.format(), Some(image::ImageFormat::Ico | image::ImageFormat::Tiff)) && !IN_HELPER.load(Ordering::Relaxed) && !cfg!(test) {
         bail!("can't read {}: the file changed while it was being read", path.display());
     }
     let mut decoder: Box<dyn ImageDecoder> = if reader.format() == Some(image::ImageFormat::Png) {
@@ -1060,12 +1072,12 @@ fn decode_avif_any(bytes: &[u8]) -> Result<Picture> {
     let (cp, tc) = (info.color_primaries.0, info.transfer_characteristics.0);
     let icc = info.icc_profile.clone().or_else(|| crate::color::from_cicp(cp, tc));
     if info.bit_depth <= 8 && !matches!(tc, 16 | 18) {
-        return Ok(Picture { px: eight(pixels_to_rgba8(&img).map(|(px, w, h)| avif_transformed(px, w, h, &info)))?, icc });
+        return Ok(Picture { px: eight(pixels_to_rgba8(&img).and_then(|(px, w, h)| avif_transformed(px, w, h, &info)))?, icc });
     }
     let (w, h) = (img.width(), img.height());
     let icc = info.icc_profile.clone();
     check_size(w, h)?;
-    let mut px = Vec::with_capacity(w as usize * h as usize * 4);
+    let mut px = pixel_capacity(w as usize * h as usize * 4)?;
     if let Some(b) = img.try_as_imgref::<rgb::Rgba<u16>>() {
         b.rows().for_each(|r| r.iter().for_each(|p| px.extend_from_slice(&[p.r, p.g, p.b, p.a])));
     } else if let Some(b) = img.try_as_imgref::<rgb::Rgb<u16>>() {
@@ -1075,9 +1087,9 @@ fn decode_avif_any(bytes: &[u8]) -> Result<Picture> {
     } else if let Some(b) = img.try_as_imgref::<rgb::Rgb<u8>>() {
         b.rows().for_each(|r| r.iter().for_each(|p| px.extend_from_slice(&[p.r as u16 * 257, p.g as u16 * 257, p.b as u16 * 257, 65535])));
     } else {
-        return Ok(Picture { px: eight(pixels_to_rgba8(&img).map(|(px, w, h)| avif_transformed(px, w, h, &info)))?, icc });
+        return Ok(Picture { px: eight(pixels_to_rgba8(&img).and_then(|(px, w, h)| avif_transformed(px, w, h, &info)))?, icc });
     }
-    let (px, w, h) = avif_transformed(px, w, h, &info);
+    let (px, w, h) = avif_transformed(px, w, h, &info)?;
     Ok(Picture { px: Decoded::Deep(crate::deep::from_rgba16(px, w, h, cp, tc)), icc })
 }
 
@@ -1091,13 +1103,13 @@ fn avif_aperture(c: &zenavif::CleanAperture, w: usize, h: usize) -> Option<(usiz
     (cw >= 1 && ch >= 1 && x + cw <= w && y + ch <= h).then_some((x, y, cw, ch))
 }
 
-fn avif_transformed<T: Copy>(mut px: Vec<T>, w: u32, h: u32, info: &zenavif::ImageInfo) -> (Vec<T>, u32, u32) {
+fn avif_transformed<T: Copy>(mut px: Vec<T>, w: u32, h: u32, info: &zenavif::ImageInfo) -> Result<(Vec<T>, u32, u32)> {
     let (mut w, mut h) = (w as usize, h as usize);
     let (angle, mirror) = (info.rotation.map_or(0, |r| r.angle), info.mirror.map(|m| m.axis));
     if let Some((x0, y0, cw, ch)) = info.clean_aperture.as_ref().and_then(|c| avif_aperture(c, w, h))
         && (cw, ch) != (w, h)
     {
-        let mut cut = Vec::with_capacity(cw * ch * 4);
+        let mut cut = pixel_capacity(cw * ch * 4)?;
         for y in y0..y0 + ch {
             cut.extend_from_slice(&px[(y * w + x0) * 4..(y * w + x0 + cw) * 4]);
         }
@@ -1105,7 +1117,7 @@ fn avif_transformed<T: Copy>(mut px: Vec<T>, w: u32, h: u32, info: &zenavif::Ima
     }
     if matches!(angle, 90 | 180 | 270) {
         let (nw, nh) = if angle == 180 { (w, h) } else { (h, w) };
-        let mut turned = Vec::with_capacity(px.len());
+        let mut turned = pixel_capacity(px.len())?;
         for y in 0..nh {
             for x in 0..nw {
                 let (sx, sy) = match angle {
@@ -1136,7 +1148,7 @@ fn avif_transformed<T: Copy>(mut px: Vec<T>, w: u32, h: u32, info: &zenavif::Ima
         }
         _ => {}
     }
-    (px, w as u32, h as u32)
+    Ok((px, w as u32, h as u32))
 }
 
 pub(crate) fn pixels_to_rgba8(img: &zenavif::PixelBuffer) -> Result<(Vec<u8>, u32, u32)> {
@@ -1144,7 +1156,7 @@ pub(crate) fn pixels_to_rgba8(img: &zenavif::PixelBuffer) -> Result<(Vec<u8>, u3
     let desc = img.descriptor();
     let (w, h) = (img.width(), img.height());
     check_size(w, h)?;
-    let mut out = Vec::with_capacity(w as usize * h as usize * 4);
+    let mut out = pixel_capacity(w as usize * h as usize * 4)?;
     if desc.layout_compatible(PixelDescriptor::RGBA8) {
         let buf = img.try_as_imgref::<rgb::Rgba<u8>>().ok_or_else(|| anyhow!("AVIF: unsupported pixel layout"))?;
         for row in buf.rows() {
@@ -1218,20 +1230,20 @@ fn jxl_render(image: jxl_oxide::JxlImage, deep: bool) -> Result<Picture> {
         bail!("this JPEG XL colour layout (CMYK or similar) isn't supported");
     }
     if deep {
-        let mut buf = vec![0u16; w * h * ch];
+        let mut buf = pixel_buffer(w * h * ch, 0u16)?;
         stream.write_to_buffer::<u16>(&mut buf);
         let rgba = jxl_rgba(buf, format, ch, u16::MAX)?;
         let (cp, tc) = hdr.map_or((0, 0), |t| jxl_hdr_tags(t, image.rendered_cicp()));
         return Ok(Picture { px: Decoded::Deep(crate::deep::from_rgba16(rgba, w as u32, h as u32, cp, tc)), icc });
     }
-    let mut buf = vec![0u8; w * h * ch];
+    let mut buf = pixel_buffer(w * h * ch, 0u8)?;
     stream.write_to_buffer::<u8>(&mut buf);
     Ok(Picture { px: Decoded::Eight(jxl_rgba(buf, format, ch, 255)?, w as u32, h as u32), icc })
 }
 
 fn jxl_rgba<T: Copy>(buf: Vec<T>, format: jxl_oxide::PixelFormat, ch: usize, opaque: T) -> Result<Vec<T>> {
     use jxl_oxide::PixelFormat;
-    let mut rgba = Vec::with_capacity(buf.len() / ch * 4);
+    let mut rgba = pixel_capacity(buf.len() / ch * 4)?;
     match (format, ch) {
         (PixelFormat::Gray, 1) => buf.iter().for_each(|&g| rgba.extend_from_slice(&[g, g, g, opaque])),
         (PixelFormat::Graya, 2) => buf.as_chunks::<2>().0.iter().for_each(|p| rgba.extend_from_slice(&[p[0], p[0], p[0], p[1]])),
@@ -1750,9 +1762,9 @@ fn make_still_bytes(src: &Source, p: &Params) -> Result<(u32, u32, Vec<u8>)> {
         Decoded::Deep(mut d) => {
             d.icc = icc;
             if p.keep_profile && crate::color::embeds(p.kind) {
-                if let Some(prof) = d.native_profile() { (crate::deep::reduce(&d.px), d.w, d.h, Some(prof)) } else { (crate::deep::to_8bit(&d), d.w, d.h, None) }
+                if let Some(prof) = d.native_profile() { (crate::deep::reduce(&d.px)?, d.w, d.h, Some(prof)) } else { (crate::deep::to_8bit(&d)?, d.w, d.h, None) }
             } else {
-                (crate::deep::to_8bit(&d), d.w, d.h, None)
+                (crate::deep::to_8bit(&d)?, d.w, d.h, None)
             }
         }
         Decoded::Eight(px, w, h) => (px, w, h, icc),
@@ -1783,7 +1795,7 @@ fn estimate_unguarded(src: &Source, p: &Params) -> Result<Estimate> {
     let (mut reference, mut w, mut h, icc) = match src {
         Source::File(path) => {
             let pic = decode_picture(path)?;
-            let (px, w, h) = pic.px.into_8bit();
+            let (px, w, h) = pic.px.into_8bit()?;
             (px, w, h, pic.icc)
         }
         Source::Pixels { rgba, w, h, .. } => ((**rgba).clone(), *w, *h, None),
@@ -1795,7 +1807,12 @@ fn estimate_unguarded(src: &Source, p: &Params) -> Result<Estimate> {
         reference = crate::color::to_srgb_8(&reference, w, &icc)?;
     }
     if p.kind == Kind::Jpeg {
-        reference = rgb_of(&reference, p.background).as_chunks::<3>().0.iter().flat_map(|c| [c[0], c[1], c[2], 255]).collect();
+        let rgb = rgb_of(&reference, p.background)?;
+        let mut opaque = pixel_capacity(rgb.len() / 3 * 4)?;
+        for c in rgb.as_chunks::<3>().0.iter() {
+            opaque.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+        reference = opaque;
     }
     let (ow, oh, bytes) = make_pixel_bytes(src, p)?;
     let original = match src {
@@ -1806,11 +1823,19 @@ fn estimate_unguarded(src: &Source, p: &Params) -> Result<Estimate> {
     if (ow, oh) != (w, h) {
         return Ok(est);
     }
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let tmp = std::env::temp_dir().join(format!("snipping-estimate-{}-{nanos}.{}", std::process::id(), p.kind.ext()));
-    std::fs::write(&tmp, &bytes)?;
-    let back = decode(&tmp);
-    let _ = std::fs::remove_file(&tmp);
+    static ESTIMATES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let dir = crate::record::work_dir();
+    let (tmp, file, doomed) = create_part_named(|| dir.join(format!("snipping-estimate-{}-{}.{}", std::process::id(), ESTIMATES.fetch_add(1, Ordering::Relaxed), p.kind.ext())), None)?;
+    let written = {
+        use std::io::Write;
+        (&file).write_all(&bytes).and_then(|()| (&file).flush())
+    };
+    let back = written.and_then(|()| if doomed { delete_on_close(&file, false) } else { Ok(()) }).map_err(Into::into).and_then(|()| decode(&tmp));
+    let doomed = delete_on_close(&file, true).is_ok();
+    drop(file);
+    if !doomed {
+        let _ = std::fs::remove_file(&tmp);
+    }
     let (back, bw, bh) = back?;
     if (bw, bh) != (w, h) {
         return Ok(est);
