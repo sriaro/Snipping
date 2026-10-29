@@ -1,4 +1,19 @@
-# Snipping
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/header-dark.png">
+    <img alt="Snipping" src="docs/header-light.png" width="560">
+  </picture>
+</p>
+
+<h3 align="center">Capture, annotate, pin and record your screen.</h3>
+
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#download">Download</a> ·
+  <a href="#build">Build</a> ·
+  <a href="#files-and-settings">Files and settings</a> ·
+  <a href="#licence">Licence</a>
+</p>
 
 Snipping is a fast screenshot and screen-recording tool for Windows.
 
