@@ -534,6 +534,10 @@ impl Text {
         }
         Some(reach)
     }
+
+    pub fn measure_system(&self, s: &str, px: f32) -> Option<f32> {
+        system::measure(s, px, self.weight).map(|w| w as f32)
+    }
 }
 
 fn blend(d: &mut [u8], color: [u8; 3], cov: u32) {
@@ -714,6 +718,12 @@ mod system {
         let m = e.1.clone();
         kept.masks.push(e);
         Some(m)
+    }
+
+    pub(super) fn measure(s: &str, px: f32, weight: u16) -> Option<i32> {
+        let mut text = utf16(s);
+        let gdi = Gdi::new(px, weight)?;
+        gdi.width(&mut text)
     }
 
     fn utf16(s: &str) -> Vec<u16> {

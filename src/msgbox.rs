@@ -5,7 +5,10 @@ use unicode_segmentation::UnicodeSegmentation;
 use windows::{
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
-        Graphics::Gdi::{CreateCompatibleDC, DeleteDC, DeleteObject, HBITMAP, HDC, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MonitorFromPoint, MonitorFromRect, SelectObject},
+        Graphics::Gdi::{
+            COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateCompatibleDC, DeleteDC, DeleteObject, GetSysColor, HBITMAP, HDC, HGDIOBJ,
+            MONITOR_DEFAULTTONEAREST, MonitorFromPoint, MonitorFromRect, SelectObject,
+        },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             Controls::WM_MOUSELEAVE,
@@ -17,7 +20,7 @@ use windows::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FindWindowExW, FlashWindowEx, GetCursorPos, GetMessageW, GetWindowRect,
                 HICON, HTCAPTION, HTCLIENT, HWND_NOTOPMOST, IDC_ARROW, KillTimer, LoadCursorW, LoadIconW, MB_ICONWARNING, MB_OK, MSG, MessageBoxW, RegisterClassExW, SPI_GETHIGHCONTRAST,
                 SPI_GETSCREENREADER, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_ACTIVATE,
-                WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE, WM_TIMER,
+                WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_TIMER,
                 WNDCLASSEXW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
             },
         },
@@ -144,7 +147,7 @@ fn wrap(t: &Text, s: &str, px: f32, max_w: f32, path: bool, most: usize) -> Vec<
                 break;
             }
             let visible = piece.trim_end_matches(' ');
-            let vw = t.advance(visible, px);
+            let vw = span(t, visible, px);
             if !line.is_empty() && width + vw > max_w {
                 out.push(line.trim_end().to_string());
                 line.clear();
@@ -152,7 +155,7 @@ fn wrap(t: &Text, s: &str, px: f32, max_w: f32, path: bool, most: usize) -> Vec<
             }
             if vw > max_w {
                 for g in visible.graphemes(true) {
-                    let gw = t.advance(g, px);
+                    let gw = span(t, g, px);
                     if !line.is_empty() && width + gw > max_w {
                         out.push(std::mem::take(&mut line));
                         width = 0.0;
@@ -162,11 +165,11 @@ fn wrap(t: &Text, s: &str, px: f32, max_w: f32, path: bool, most: usize) -> Vec<
                 }
                 if piece.len() > visible.len() && !line.is_empty() {
                     line.push(' ');
-                    width += t.advance(" ", px);
+                    width += span(t, " ", px);
                 }
             } else {
                 line.push_str(piece);
-                width += t.advance(piece, px);
+                width += span(t, piece, px);
             }
         }
         if !line.is_empty() {
@@ -181,14 +184,29 @@ fn clip(s: &str) -> &str {
     s.char_indices().nth(MAX_LINE).map_or(s, |(i, _)| &s[..i])
 }
 
+fn span(t: &Text, s: &str, px: f32) -> f32 {
+    if crate::text::needs_shaping(s)
+        && let Some(w) = t.measure_system(s, px)
+    {
+        return w;
+    }
+    t.advance(s, px)
+}
+
+fn ink_line(t: &Text, pix: &mut Pixmap, s: &str, (x, y): (f32, f32), px: f32, room: f32, colour: [u8; 3]) {
+    if t.draw_system_alpha(pix, s, x, y, px, room, colour, 1.0).is_none() {
+        t.draw(pix, s, x, y, px, colour);
+    }
+}
+
 fn cap(mut lines: Vec<String>, n: usize, t: &Text, px: f32, max_w: f32) -> Vec<String> {
     if lines.len() <= n || n == 0 {
         return lines;
     }
     lines.truncate(n);
     if let Some(last) = lines.last_mut() {
-        let ellipsis = t.advance("…", px);
-        let parts: Vec<(usize, f32)> = last.graphemes(true).map(|g| (g.len(), t.advance(g, px))).collect();
+        let ellipsis = span(t, "…", px);
+        let parts: Vec<(usize, f32)> = last.graphemes(true).map(|g| (g.len(), span(t, g, px))).collect();
         let mut width: f32 = parts.iter().map(|p| p.1).sum();
         let (mut keep, mut cut) = (parts.len(), last.len());
         while keep > 0 && width + ellipsis > max_w {
@@ -208,8 +226,8 @@ fn cap_tail(mut lines: Vec<String>, n: usize, t: &Text, px: f32, max_w: f32) -> 
     }
     let mut tail = lines.split_off(lines.len() - n);
     let first = &mut tail[0];
-    let ellipsis = t.advance("…", px);
-    let parts: Vec<(usize, f32)> = first.graphemes(true).map(|g| (g.len(), t.advance(g, px))).collect();
+    let ellipsis = span(t, "…", px);
+    let parts: Vec<(usize, f32)> = first.graphemes(true).map(|g| (g.len(), span(t, g, px))).collect();
     let mut width: f32 = parts.iter().map(|p| p.1).sum();
     let (mut skip, mut cut) = (0, 0);
     while skip < parts.len() && width + ellipsis > max_w {
@@ -476,7 +494,7 @@ fn shadow(pix: &mut Pixmap, m: f32, bw: f32, bh: f32, radius: f32, s: f32, dark:
     }
 }
 
-fn warning_icon(pix: &mut Pixmap, r: [f32; 4], s: f32) {
+fn warning_icon(pix: &mut Pixmap, r: [f32; 4], s: f32, plain: Option<([u8; 3], [u8; 3])>) {
     let id = Transform::identity();
     let (x, y, size) = (r[0], r[1], r[2]);
     let cx = x + size / 2.0;
@@ -486,12 +504,15 @@ fn warning_icon(pix: &mut Pixmap, r: [f32; 4], s: f32) {
     tri.line_to(x + 0.05 * size, y + 0.86 * size);
     tri.close();
     if let Some(path) = tri.finish() {
-        let amber = menu::gradient(y, y + size, &[(0.0, [255, 208, 72, 255]), (1.0, [248, 158, 16, 255])]);
-        pix.fill_path(&path, &amber, FillRule::Winding, id, None);
+        let fill = match plain {
+            Some((face, _)) => menu::paint(face, 255),
+            None => menu::gradient(y, y + size, &[(0.0, [255, 208, 72, 255]), (1.0, [248, 158, 16, 255])]),
+        };
+        pix.fill_path(&path, &fill, FillRule::Winding, id, None);
         let st = Stroke { width: 2.6 * s, line_join: LineJoin::Round, ..Default::default() };
-        pix.stroke_path(&path, &amber, &st, id, None);
+        pix.stroke_path(&path, &fill, &st, id, None);
     }
-    let ink = menu::paint([58, 38, 4], 255);
+    let ink = menu::paint(plain.map_or([58, 38, 4], |p| p.1), 255);
     let mut bar = PathBuilder::new();
     bar.move_to(cx, y + 0.36 * size);
     bar.line_to(cx, y + 0.60 * size);
@@ -504,7 +525,114 @@ fn warning_icon(pix: &mut Pixmap, r: [f32; 4], s: f32) {
     }
 }
 
-fn draw(p: &Plan, f: &Fonts, logo: &Pixmap, dark: bool, s: f32, v: &View, backdrop: Option<&Pixmap>) -> Option<Pixmap> {
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Contrast {
+    back: [u8; 3],
+    ink: [u8; 3],
+    face: [u8; 3],
+    face_ink: [u8; 3],
+    hot: [u8; 3],
+    hot_ink: [u8; 3],
+}
+
+fn system_contrast() -> Option<Contrast> {
+    if !high_contrast() {
+        return None;
+    }
+    let c = |i| {
+        let v = unsafe { GetSysColor(i) };
+        [(v & 0xFF) as u8, (v >> 8 & 0xFF) as u8, (v >> 16 & 0xFF) as u8]
+    };
+    Some(Contrast { back: c(COLOR_WINDOW), ink: c(COLOR_WINDOWTEXT), face: c(COLOR_BTNFACE), face_ink: c(COLOR_BTNTEXT), hot: c(COLOR_HIGHLIGHT), hot_ink: c(COLOR_HIGHLIGHTTEXT) })
+}
+
+fn draw_contrast(p: &Plan, f: &Fonts, logo: &Pixmap, s: f32, v: &View, k: &Contrast) -> Option<Pixmap> {
+    let id = Transform::identity();
+    let m = (SHADOW * s).round();
+    let mut pix = Pixmap::new((p.w + 2.0 * m) as u32, (p.h + 2.0 * m) as u32)?;
+    let at = |r: [f32; 4]| [r[0] + m, r[1] + m, r[2], r[3]];
+    let line = s.max(1.0);
+    let thin = Stroke { width: line, ..Default::default() };
+    let body = rrect([m, m, p.w, p.h], RADIUS * s)?;
+    pix.fill_path(&body, &menu::paint(k.back, 255), FillRule::Winding, id, None);
+    if let Some(edge) = rrect([m + line / 2.0, m + line / 2.0, p.w - line, p.h - line], RADIUS * s - line / 2.0) {
+        pix.stroke_path(&edge, &menu::paint(k.ink, 255), &thin, id, None);
+    }
+    if let Some(r) = tiny_skia::Rect::from_xywh(m, m + p.foot_y, p.w, line) {
+        pix.fill_rect(r, &menu::paint(k.ink, 255), id, None);
+    }
+
+    let logo_px = logo.width() as f32;
+    pix.draw_pixmap((m + 16.0 * s) as i32, (m + (p.title_h - logo_px) / 2.0).round() as i32, logo.as_ref(), &PixmapPaint::default(), id, None);
+    let small = 12.0 * s;
+    f.reg.draw(&mut pix, "Snipping", m + 16.0 * s + logo_px + 8.0 * s, m + (p.title_h - f.reg.line_height(small)) / 2.0, small, k.ink);
+    let close = at(p.close);
+    let close_hot = v.hover == Some(Hit::Close);
+    if close_hot && let Some(path) = rrect(close, 7.0 * s) {
+        pix.fill_path(&path, &menu::paint(k.hot, 255), FillRule::Winding, id, None);
+    }
+    {
+        let (cx, cy, d) = (close[0] + close[2] / 2.0, close[1] + close[3] / 2.0, 4.2 * s);
+        let mut x = PathBuilder::new();
+        x.move_to(cx - d, cy - d);
+        x.line_to(cx + d, cy + d);
+        x.move_to(cx + d, cy - d);
+        x.line_to(cx - d, cy + d);
+        if let Some(path) = x.finish() {
+            let st = Stroke { width: 1.4 * s, line_cap: LineCap::Round, ..Default::default() };
+            pix.stroke_path(&path, &menu::paint(if close_hot { k.hot_ink } else { k.ink }, 255), &st, id, None);
+        }
+    }
+
+    warning_icon(&mut pix, at(p.icon), s, Some((k.ink, k.back)));
+
+    for cmd in &p.cmds {
+        match cmd {
+            Cmd::Chip(r) => {
+                if let Some(path) = rrect(at(*r), 8.0 * s) {
+                    pix.stroke_path(&path, &menu::paint(k.ink, 255), &thin, id, None);
+                }
+            }
+            Cmd::Text { x, y, s: text, px, bold, .. } => {
+                let font = if *bold { f.bold } else { f.reg };
+                ink_line(font, &mut pix, text, (m + x, m + y), *px, p.w - x - 8.0 * s, k.ink);
+            }
+        }
+    }
+
+    let bp = BODY_PX * s;
+    for (i, b) in p.buttons.iter().enumerate() {
+        let hot = v.hover == Some(Hit::Button(i));
+        let r = at(b.rect);
+        let Some(path) = rrect(r, 7.0 * s) else {
+            continue;
+        };
+        let (fill, text, edge) = match (b.primary, hot) {
+            (true, false) => (k.hot, k.hot_ink, k.hot),
+            (true, true) => (k.hot_ink, k.hot, k.hot),
+            (false, false) => (k.face, k.face_ink, k.face_ink),
+            (false, true) => (k.hot, k.hot_ink, k.hot),
+        };
+        pix.fill_path(&path, &menu::paint(fill, 255), FillRule::Winding, id, None);
+        pix.stroke_path(&path, &menu::paint(edge, 255), &thin, id, None);
+        let font = if b.primary { f.bold } else { f.reg };
+        let tw = font.advance(&b.label, bp);
+        font.draw(&mut pix, &b.label, r[0] + (r[2] - tw) / 2.0, r[1] + (r[3] - font.line_height(bp)) / 2.0, bp, text);
+        if v.kbd
+            && v.focus == i
+            && let Some(ring) = rrect([r[0] - 3.0 * s, r[1] - 3.0 * s, r[2] + 6.0 * s, r[3] + 6.0 * s], 10.0 * s)
+        {
+            pix.stroke_path(&ring, &menu::paint(k.ink, 255), &Stroke { width: 2.0 * s, ..Default::default() }, id, None);
+        }
+    }
+    Some(pix)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw(p: &Plan, f: &Fonts, logo: &Pixmap, dark: bool, s: f32, v: &View, backdrop: Option<&Pixmap>, contrast: Option<&Contrast>) -> Option<Pixmap> {
+    if let Some(k) = contrast {
+        return draw_contrast(p, f, logo, s, v, k);
+    }
     let id = Transform::identity();
     let c = menu::pal(dark);
     let m = (SHADOW * s).round();
@@ -551,7 +679,7 @@ fn draw(p: &Plan, f: &Fonts, logo: &Pixmap, dark: bool, s: f32, v: &View, backdr
         }
     }
 
-    warning_icon(&mut pix, at(p.icon), s);
+    warning_icon(&mut pix, at(p.icon), s, None);
 
     for cmd in &p.cmds {
         match cmd {
@@ -563,7 +691,7 @@ fn draw(p: &Plan, f: &Fonts, logo: &Pixmap, dark: bool, s: f32, v: &View, backdr
             }
             Cmd::Text { x, y, s: text, px, bold, tone } => {
                 let font = if *bold { f.bold } else { f.reg };
-                font.draw(&mut pix, text, m + x, m + y, *px, tone_colour(*tone, &c));
+                ink_line(font, &mut pix, text, (m + x, m + y), *px, p.w - x - 8.0 * s, tone_colour(*tone, &c));
             }
         }
     }
@@ -630,6 +758,7 @@ struct Dlg {
     fonts: (Arc<Text>, Arc<Text>),
     logo: Pixmap,
     dark: bool,
+    contrast: Option<Contrast>,
     s: f32,
     backdrop: Option<Pixmap>,
     view: View,
@@ -675,7 +804,7 @@ fn with<R>(f: impl FnOnce(&mut Dlg) -> R) -> Option<R> {
 
 pub fn show(given: &str) {
     let text = &*crate::text::normalize_display(given);
-    if needs_system_text(text) || assistive() {
+    if screen_reader() {
         classic(text);
         return;
     }
@@ -687,11 +816,12 @@ pub fn show(given: &str) {
     crate::mem::release();
 }
 
-fn needs_system_text(text: &str) -> bool {
-    crate::text::needs_shaping(text)
+fn screen_reader() -> bool {
+    let mut reader = BOOL(0);
+    unsafe { SystemParametersInfoW(SPI_GETSCREENREADER, 0, Some(&mut reader as *mut BOOL as *mut c_void), Default::default()).is_ok() && reader.as_bool() }
 }
 
-fn assistive() -> bool {
+fn high_contrast() -> bool {
     #[repr(C)]
     struct HighContrast {
         size: u32,
@@ -699,13 +829,9 @@ fn assistive() -> bool {
         scheme: *mut u16,
     }
     const HCF_HIGHCONTRASTON: u32 = 1;
-    let mut reader = BOOL(0);
     let mut contrast = HighContrast { size: size_of::<HighContrast>() as u32, flags: 0, scheme: std::ptr::null_mut() };
     unsafe {
-        let r = SystemParametersInfoW(SPI_GETSCREENREADER, 0, Some(&mut reader as *mut BOOL as *mut c_void), Default::default()).is_ok() && reader.as_bool();
-        let h =
-            SystemParametersInfoW(SPI_GETHIGHCONTRAST, contrast.size, Some(&mut contrast as *mut HighContrast as *mut c_void), Default::default()).is_ok() && contrast.flags & HCF_HIGHCONTRASTON != 0;
-        r || h
+        SystemParametersInfoW(SPI_GETHIGHCONTRAST, contrast.size, Some(&mut contrast as *mut HighContrast as *mut c_void), Default::default()).is_ok() && contrast.flags & HCF_HIGHCONTRASTON != 0
     }
 }
 
@@ -821,7 +947,8 @@ fn open(n: &Notice) -> bool {
     let by = (work[1] + (work[3] - work[1] - bh) * 9 / 20 + dy).min(work[3] - bh).max(work[1]);
     let title = window_title(&n.heading);
     let logo = crate::icon::render((16.0 * s).round().max(16.0) as u32);
-    let backdrop = menu::grab_backdrop(bx, by, bw, bh, s);
+    let contrast = system_contrast();
+    let backdrop = if contrast.is_some() { None } else { menu::grab_backdrop(bx, by, bw, bh, s) };
     let animate = crate::settings::animations_on();
 
     let Ok(hwnd) =
@@ -853,6 +980,7 @@ fn open(n: &Notice) -> bool {
         fonts: (reg, bold),
         logo,
         dark,
+        contrast,
         s,
         backdrop,
         view: View { focus, ..View::default() },
@@ -958,7 +1086,7 @@ fn rescale(dpi: u32, to: Option<RECT>) {
 fn redraw() -> bool {
     with(|d| {
         let fonts = Fonts { reg: &d.fonts.0, bold: &d.fonts.1 };
-        d.pic = draw(&d.plan, &fonts, &d.logo, d.dark, d.s, &d.view, d.backdrop.as_ref());
+        d.pic = draw(&d.plan, &fonts, &d.logo, d.dark, d.s, &d.view, d.backdrop.as_ref(), d.contrast.as_ref());
     });
     present()
 }
@@ -1221,13 +1349,18 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             rescale((wp.0 & 0xFFFF) as u32, to);
             return LRESULT(0);
         }
-        WM_SETTINGCHANGE => {
-            let named = lp.0 != 0 && unsafe { PCWSTR(lp.0 as *const u16).to_string() }.is_ok_and(|n| n == "ImmersiveColorSet");
-            if named {
-                let dark = crate::config::saved_theme().is_dark();
-                if with(|d| std::mem::replace(&mut d.dark, dark) != dark) == Some(true) {
-                    redraw();
-                }
+        WM_SETTINGCHANGE | WM_SYSCOLORCHANGE => {
+            let named = msg == WM_SETTINGCHANGE && lp.0 != 0 && unsafe { PCWSTR(lp.0 as *const u16).to_string() }.is_ok_and(|n| n == "ImmersiveColorSet");
+            let dark = named.then(|| crate::config::saved_theme().is_dark());
+            let contrast = system_contrast();
+            let changed = with(|d| {
+                let was = (d.dark, d.contrast);
+                d.dark = dark.unwrap_or(d.dark);
+                d.contrast = contrast;
+                was != (d.dark, d.contrast)
+            });
+            if changed == Some(true) {
+                redraw();
             }
         }
         WM_CLOSE => {
